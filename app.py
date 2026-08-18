@@ -1,7 +1,4 @@
 import os
-from pathlib import Path
-from typing import Dict, List, Tuple, Optional
-
 import joblib
 import numpy as np
 import pandas as pd
@@ -10,304 +7,337 @@ import matplotlib.pyplot as plt
 
 from sklearn.metrics import (
     accuracy_score,
+    roc_auc_score,
     precision_score,
     recall_score,
     f1_score,
-    roc_auc_score,
     matthews_corrcoef,
     confusion_matrix,
-    classification_report,
+    classification_report
 )
 
 
-# ============================================================
-# Application Settings
-# ============================================================
-
-APP_TITLE = "Telco Customer Churn Prediction"
-MODEL_DIRECTORY = Path("model")
-
-MODEL_REGISTRY: Dict[str, str] = {
-    "Logistic Regression": "logistic_regression.pkl",
-    "Decision Tree": "decision_tree.pkl",
-    "K-Nearest Neighbors": "knn.pkl",
-    "Naive Bayes": "naive_bayes.pkl",
-    "Random Forest": "random_forest.pkl",
-}
-
-MODELS_REQUIRING_SCALING: List[str] = [
-    "Logistic Regression",
-    "K-Nearest Neighbors",
-    "Naive Bayes",
-]
-
-TARGET_COLUMN = "Churn"
-
-
-# ============================================================
-# Page Setup
-# ============================================================
+# ------------------------------------------------------------
+# Page Configuration
+# ------------------------------------------------------------
 
 st.set_page_config(
-    page_title=APP_TITLE,
-    layout="wide",
-    initial_sidebar_state="expanded",
+    page_title="Telco Customer Churn Prediction",
+    layout="wide"
 )
 
 st.title("Machine Learning Assignment 2")
-st.subheader("Telco Customer Churn Prediction Using Classification Models")
+st.subheader("Telco Customer Churn Prediction using Classification Models")
 
-st.markdown(
+st.write(
     """
-This application evaluates trained classification models on uploaded Telco customer data.
-It supports model-level evaluation, confusion matrix visualization, classification reports,
-and comparison of multiple models.
-"""
+    This Streamlit application evaluates multiple machine learning classification
+    models on uploaded Telco Customer Churn test data. The app displays evaluation
+    metrics, confusion matrix, classification report, and model comparison results.
+    """
 )
 
 
-# ============================================================
-# Cached Loaders
-# ============================================================
+# ------------------------------------------------------------
+# Model Folder and Model Files
+# ------------------------------------------------------------
+
+MODEL_DIR = "model"
+
+MODEL_FILES = {
+    "Logistic Regression": "logistic_regression.pkl",
+    "Decision Tree": "decision_tree.pkl",
+    "KNN": "knn.pkl",
+    "Naive Bayes": "naive_bayes.pkl",
+    "Random Forest": "random_forest.pkl"
+}
+
+SCALED_MODELS = [
+    "Logistic Regression",
+    "KNN",
+    "Naive Bayes"
+]
+
+
+# ------------------------------------------------------------
+# Load Saved Models and Scaler
+# ------------------------------------------------------------
 
 @st.cache_resource
-def load_saved_model(model_label: str):
-    """
-    Load a trained model from the model directory.
-    """
-    model_file = MODEL_REGISTRY[model_label]
-    model_path = MODEL_DIRECTORY / model_file
-
-    if not model_path.exists():
-        raise FileNotFoundError(f"Model file not found: {model_path}")
-
+def load_model(model_name):
+    model_path = os.path.join(MODEL_DIR, MODEL_FILES[model_name])
     return joblib.load(model_path)
 
 
 @st.cache_resource
-def load_saved_scaler():
-    """
-    Load the fitted scaler used during training.
-    """
-    scaler_path = MODEL_DIRECTORY / "scaler.pkl"
-
-    if not scaler_path.exists():
-        raise FileNotFoundError(f"Scaler file not found: {scaler_path}")
-
+def load_scaler():
+    scaler_path = os.path.join(MODEL_DIR, "scaler.pkl")
     return joblib.load(scaler_path)
 
 
-# ============================================================
-# Data Processing Helpers
-# ============================================================
+# ------------------------------------------------------------
+# Sidebar Navigation
+# ------------------------------------------------------------
 
-def clean_total_charges(data: pd.DataFrame) -> pd.DataFrame:
+st.sidebar.header("Navigation")
+
+section = st.sidebar.radio(
+    "Choose a section",
+    [
+        "Upload Test Data",
+        "Evaluate Single Model",
+        "Compare All Models"
+    ]
+)
+
+st.sidebar.markdown("---")
+st.sidebar.info(
     """
-    Convert TotalCharges to numeric and handle invalid values.
+    Upload a Telco Customer Churn test dataset in CSV format.
+    If the dataset includes a Churn column, the app will calculate
+    evaluation metrics.
     """
-    if "TotalCharges" in data.columns:
-        data["TotalCharges"] = pd.to_numeric(data["TotalCharges"], errors="coerce")
-        data["TotalCharges"] = data["TotalCharges"].fillna(data["TotalCharges"].median())
-
-    return data
+)
 
 
-def remove_unused_columns(data: pd.DataFrame) -> pd.DataFrame:
+# ------------------------------------------------------------
+# Session State
+# ------------------------------------------------------------
+
+if "uploaded_data" not in st.session_state:
+    st.session_state.uploaded_data = None
+
+
+# ------------------------------------------------------------
+# Encoding Helper
+# ------------------------------------------------------------
+
+def encode_telco_columns(df):
     """
-    Remove columns that are identifiers or not useful for model prediction.
+    Encodes Telco categorical columns into numeric values.
+
+    Important:
+    This version avoids pd.get_dummies(), because your trained models expect
+    original feature names such as Contract, Dependents, InternetService, etc.
     """
-    columns_to_remove = ["customerID"]
 
-    existing_columns = [col for col in columns_to_remove if col in data.columns]
-    if existing_columns:
-        data = data.drop(columns=existing_columns)
+    encoded_df = df.copy()
 
-    return data
-
-
-def encode_target_column(data: pd.DataFrame) -> pd.DataFrame:
-    """
-    Convert Churn values from Yes/No to 1/0 if needed.
-    """
-    if TARGET_COLUMN in data.columns:
-        if data[TARGET_COLUMN].dtype == "object":
-            data[TARGET_COLUMN] = data[TARGET_COLUMN].map({"Yes": 1, "No": 0})
-
-    return data
-
-
-def encode_categorical_features(data: pd.DataFrame) -> pd.DataFrame:
-    """
-    Convert categorical columns into numeric values using one-hot encoding.
-    """
-    categorical_columns = data.select_dtypes(include=["object"]).columns.tolist()
-
-    if categorical_columns:
-        data = pd.get_dummies(data, columns=categorical_columns, drop_first=True)
-
-    return data
-
-
-def align_features_with_training(
-    features: pd.DataFrame,
-    model
-) -> pd.DataFrame:
-    """
-    Align uploaded feature columns with the feature names used during training.
-
-    This works if the model was trained using scikit-learn with feature names.
-    If feature names are unavailable, the function returns the uploaded feature set.
-    """
-    if hasattr(model, "feature_names_in_"):
-        expected_columns = list(model.feature_names_in_)
-
-        for column in expected_columns:
-            if column not in features.columns:
-                features[column] = 0
-
-        features = features[expected_columns]
-
-    return features
-
-
-def prepare_uploaded_dataset(
-    uploaded_data: pd.DataFrame,
-    model
-) -> Tuple[pd.DataFrame, Optional[pd.Series]]:
-    """
-    Prepare raw uploaded Telco churn data for prediction and evaluation.
-
-    Returns:
-        X: Processed feature matrix
-        y: Target values if Churn column is available, otherwise None
-    """
-    data = uploaded_data.copy()
-
-    data = remove_unused_columns(data)
-    data = clean_total_charges(data)
-    data = encode_target_column(data)
-
-    if TARGET_COLUMN in data.columns:
-        y = data[TARGET_COLUMN]
-        X = data.drop(columns=[TARGET_COLUMN])
-    else:
-        y = None
-        X = data
-
-    X = encode_categorical_features(X)
-    X = align_features_with_training(X, model)
-
-    return X, y
-
-
-def apply_scaling_if_required(
-    model_name: str,
-    features: pd.DataFrame
-) -> pd.DataFrame:
-    """
-    Apply the saved scaler only for models that require scaled input.
-    """
-    if model_name not in MODELS_REQUIRING_SCALING:
-        return features
-
-    scaler = load_saved_scaler()
-    scaled_values = scaler.transform(features)
-
-    return pd.DataFrame(
-        scaled_values,
-        columns=features.columns,
-        index=features.index,
-    )
-
-
-# ============================================================
-# Evaluation Helpers
-# ============================================================
-
-def calculate_metrics(
-    actual: pd.Series,
-    predicted: np.ndarray,
-    predicted_probability: Optional[np.ndarray]
-) -> Dict[str, float]:
-    """
-    Calculate standard classification metrics.
-    """
-    metrics = {
-        "Accuracy": accuracy_score(actual, predicted),
-        "Precision": precision_score(actual, predicted, zero_division=0),
-        "Recall": recall_score(actual, predicted, zero_division=0),
-        "F1 Score": f1_score(actual, predicted, zero_division=0),
-        "MCC": matthews_corrcoef(actual, predicted),
+    mapping_rules = {
+        "gender": {
+            "Female": 0,
+            "Male": 1
+        },
+        "Partner": {
+            "No": 0,
+            "Yes": 1
+        },
+        "Dependents": {
+            "No": 0,
+            "Yes": 1
+        },
+        "PhoneService": {
+            "No": 0,
+            "Yes": 1
+        },
+        "MultipleLines": {
+            "No": 0,
+            "No phone service": 1,
+            "Yes": 2
+        },
+        "InternetService": {
+            "DSL": 0,
+            "Fiber optic": 1,
+            "No": 2
+        },
+        "OnlineSecurity": {
+            "No": 0,
+            "No internet service": 1,
+            "Yes": 2
+        },
+        "OnlineBackup": {
+            "No": 0,
+            "No internet service": 1,
+            "Yes": 2
+        },
+        "DeviceProtection": {
+            "No": 0,
+            "No internet service": 1,
+            "Yes": 2
+        },
+        "TechSupport": {
+            "No": 0,
+            "No internet service": 1,
+            "Yes": 2
+        },
+        "StreamingTV": {
+            "No": 0,
+            "No internet service": 1,
+            "Yes": 2
+        },
+        "StreamingMovies": {
+            "No": 0,
+            "No internet service": 1,
+            "Yes": 2
+        },
+        "Contract": {
+            "Month-to-month": 0,
+            "One year": 1,
+            "Two year": 2
+        },
+        "PaperlessBilling": {
+            "No": 0,
+            "Yes": 1
+        },
+        "PaymentMethod": {
+            "Bank transfer (automatic)": 0,
+            "Credit card (automatic)": 1,
+            "Electronic check": 2,
+            "Mailed check": 3
+        },
+        "Churn": {
+            "No": 0,
+            "Yes": 1
+        }
     }
 
-    if predicted_probability is not None:
-        try:
-            metrics["ROC AUC"] = roc_auc_score(actual, predicted_probability)
-        except ValueError:
-            metrics["ROC AUC"] = np.nan
-    else:
-        metrics["ROC AUC"] = np.nan
+    for column, mapping in mapping_rules.items():
+        if column in encoded_df.columns:
+            encoded_df[column] = encoded_df[column].map(mapping)
 
-    return metrics
+    return encoded_df
 
 
-def get_prediction_probability(model, features: pd.DataFrame) -> Optional[np.ndarray]:
+# ------------------------------------------------------------
+# Prepare Uploaded Dataset
+# ------------------------------------------------------------
+
+def prepare_uploaded_data(uploaded_df, model=None):
     """
-    Return positive-class probabilities if the model supports predict_proba.
+    Prepares uploaded test data for prediction.
+
+    This function:
+    1. Removes customerID.
+    2. Separates Churn as target if available.
+    3. Converts TotalCharges to numeric.
+    4. Encodes categorical columns without creating dummy columns.
+    5. Aligns feature columns with the selected model's training columns.
     """
+
+    df = uploaded_df.copy()
+
+    # Remove customerID because it is not useful for prediction
+    if "customerID" in df.columns:
+        df.drop(columns=["customerID"], inplace=True)
+
+    # Separate target column if available
+    y_test = None
+
+    if "Churn" in df.columns:
+        y_test = df["Churn"].copy()
+        df.drop(columns=["Churn"], inplace=True)
+
+        if y_test.dtype == "object":
+            y_test = y_test.map({
+                "No": 0,
+                "Yes": 1
+            })
+
+    # Convert TotalCharges to numeric
+    if "TotalCharges" in df.columns:
+        df["TotalCharges"] = pd.to_numeric(df["TotalCharges"], errors="coerce")
+
+    # Fill missing numeric values
+    numeric_columns = df.select_dtypes(include=[np.number]).columns
+    for column in numeric_columns:
+        df[column] = df[column].fillna(df[column].median())
+
+    # Fill missing categorical values
+    categorical_columns = df.select_dtypes(include=["object"]).columns
+    for column in categorical_columns:
+        df[column] = df[column].fillna(df[column].mode()[0])
+
+    # Encode categorical columns
+    df = encode_telco_columns(df)
+
+    # If any unmapped categorical values remain, convert safely
+    for column in df.columns:
+        if df[column].dtype == "object":
+            df[column] = pd.factorize(df[column])[0]
+
+    # Align columns with model training features
+    if model is not None and hasattr(model, "feature_names_in_"):
+        expected_columns = list(model.feature_names_in_)
+
+        missing_columns = [col for col in expected_columns if col not in df.columns]
+        extra_columns = [col for col in df.columns if col not in expected_columns]
+
+        if missing_columns:
+            st.warning(
+                "Some expected model features were missing from the uploaded file. "
+                "They were added with value 0."
+            )
+            st.write("Missing columns:", missing_columns)
+
+            for column in missing_columns:
+                df[column] = 0
+
+        if extra_columns:
+            st.info(
+                "Some uploaded columns were not used by the model and were removed."
+            )
+            st.write("Removed columns:", extra_columns)
+
+        df = df[expected_columns]
+
+    return df, y_test
+
+
+# ------------------------------------------------------------
+# Evaluation Function
+# ------------------------------------------------------------
+
+def evaluate_model(model, X_test, y_test):
+    """
+    Evaluates a classification model and returns predictions and metrics.
+    """
+
+    y_pred = model.predict(X_test)
+
+    results = {
+        "Accuracy": accuracy_score(y_test, y_pred),
+        "Precision": precision_score(y_test, y_pred, zero_division=0),
+        "Recall": recall_score(y_test, y_pred, zero_division=0),
+        "F1 Score": f1_score(y_test, y_pred, zero_division=0),
+        "MCC": matthews_corrcoef(y_test, y_pred)
+    }
+
     if hasattr(model, "predict_proba"):
-        probability_values = model.predict_proba(features)
-        return probability_values[:, 1]
+        y_probability = model.predict_proba(X_test)[:, 1]
+        results["ROC AUC"] = roc_auc_score(y_test, y_probability)
+    else:
+        results["ROC AUC"] = np.nan
 
-    return None
+    cm = confusion_matrix(y_test, y_pred)
 
+    report = classification_report(
+        y_test,
+        y_pred,
+        output_dict=True,
+        zero_division=0
+    )
 
-def evaluate_classifier(
-    model_name: str,
-    features: pd.DataFrame,
-    actual: pd.Series
-) -> Tuple[Dict[str, float], np.ndarray, str]:
-    """
-    Load model, generate predictions, and calculate metrics.
-    """
-    model = load_saved_model(model_name)
-
-    processed_features = align_features_with_training(features.copy(), model)
-    processed_features = apply_scaling_if_required(model_name, processed_features)
-
-    predictions = model.predict(processed_features)
-    probabilities = get_prediction_probability(model, processed_features)
-
-    metrics = calculate_metrics(actual, predictions, probabilities)
-    report = classification_report(actual, predictions, zero_division=0)
-
-    return metrics, predictions, report
+    return y_pred, results, cm, report
 
 
-def show_metric_cards(metrics: Dict[str, float]) -> None:
-    """
-    Display model metrics in Streamlit metric cards.
-    """
-    col1, col2, col3 = st.columns(3)
-    col4, col5, col6 = st.columns(3)
+# ------------------------------------------------------------
+# Display Confusion Matrix
+# ------------------------------------------------------------
 
-    metric_items = list(metrics.items())
-    columns = [col1, col2, col3, col4, col5, col6]
+def display_confusion_matrix(cm):
+    fig, ax = plt.subplots()
 
-    for index, (metric_name, value) in enumerate(metric_items):
-        display_value = "N/A" if pd.isna(value) else f"{value:.4f}"
-        columns[index].metric(metric_name, display_value)
-
-
-def plot_confusion_matrix(actual: pd.Series, predicted: np.ndarray) -> None:
-    """
-    Display a confusion matrix using matplotlib.
-    """
-    matrix = confusion_matrix(actual, predicted)
-
-    fig, ax = plt.subplots(figsize=(5, 4))
-    image = ax.imshow(matrix)
-
+    ax.imshow(cm)
     ax.set_title("Confusion Matrix")
     ax.set_xlabel("Predicted Label")
     ax.set_ylabel("Actual Label")
@@ -317,271 +347,235 @@ def plot_confusion_matrix(actual: pd.Series, predicted: np.ndarray) -> None:
     ax.set_xticklabels(["No Churn", "Churn"])
     ax.set_yticklabels(["No Churn", "Churn"])
 
-    for row in range(matrix.shape[0]):
-        for col in range(matrix.shape[1]):
+    for i in range(cm.shape[0]):
+        for j in range(cm.shape[1]):
             ax.text(
-                col,
-                row,
-                matrix[row, col],
+                j,
+                i,
+                cm[i, j],
                 ha="center",
-                va="center",
-                color="white" if matrix[row, col] > matrix.max() / 2 else "black",
-                fontsize=12,
+                va="center"
             )
 
-    fig.colorbar(image, ax=ax)
     st.pyplot(fig)
 
 
-def build_comparison_table(
-    features: pd.DataFrame,
-    actual: pd.Series
-) -> pd.DataFrame:
-    """
-    Evaluate all registered models and return metrics as a DataFrame.
-    """
-    comparison_rows = []
-
-    for model_name in MODEL_REGISTRY:
-        try:
-            metrics, _, _ = evaluate_classifier(model_name, features, actual)
-            row = {"Model": model_name}
-            row.update(metrics)
-            comparison_rows.append(row)
-
-        except Exception as error:
-            comparison_rows.append(
-                {
-                    "Model": model_name,
-                    "Accuracy": np.nan,
-                    "Precision": np.nan,
-                    "Recall": np.nan,
-                    "F1 Score": np.nan,
-                    "MCC": np.nan,
-                    "ROC AUC": np.nan,
-                    "Error": str(error),
-                }
-            )
-
-    return pd.DataFrame(comparison_rows)
-
-
-# ============================================================
-# Sidebar
-# ============================================================
-
-st.sidebar.header("Navigation")
-
-selected_section = st.sidebar.radio(
-    "Choose a section",
-    [
-        "Upload Test Data",
-        "Evaluate Single Model",
-        "Compare All Models",
-    ],
-)
-
-st.sidebar.markdown("---")
-st.sidebar.info(
-    """
-Upload a Telco Customer Churn test dataset in CSV format.
-If the dataset includes a `Churn` column, the app will calculate evaluation metrics.
-"""
-)
-
-
-# ============================================================
-# Session State
-# ============================================================
-
-if "uploaded_df" not in st.session_state:
-    st.session_state.uploaded_df = None
-
-if "prepared_features" not in st.session_state:
-    st.session_state.prepared_features = None
-
-if "target_values" not in st.session_state:
-    st.session_state.target_values = None
-
-
-# ============================================================
+# ------------------------------------------------------------
 # Section 1: Upload Test Data
-# ============================================================
+# ------------------------------------------------------------
 
-if selected_section == "Upload Test Data":
+if section == "Upload Test Data":
+
     st.header("Upload Test Dataset")
 
     uploaded_file = st.file_uploader(
-        "Upload a CSV file",
-        type=["csv"],
+        "Upload CSV file",
+        type=["csv"]
     )
 
     if uploaded_file is not None:
         try:
             uploaded_df = pd.read_csv(uploaded_file)
-            st.session_state.uploaded_df = uploaded_df
+            st.session_state.uploaded_data = uploaded_df
 
             st.success("File uploaded successfully.")
 
             st.subheader("Dataset Preview")
             st.dataframe(uploaded_df.head())
 
-            st.subheader("Dataset Summary")
-            col1, col2, col3 = st.columns(3)
+            st.subheader("Dataset Shape")
+            st.write(f"Rows: {uploaded_df.shape[0]}")
+            st.write(f"Columns: {uploaded_df.shape[1]}")
 
-            col1.metric("Rows", uploaded_df.shape[0])
-            col2.metric("Columns", uploaded_df.shape[1])
-            col3.metric(
-                "Target Available",
-                "Yes" if TARGET_COLUMN in uploaded_df.columns else "No",
-            )
-
-            if TARGET_COLUMN in uploaded_df.columns:
-                st.subheader("Target Column Distribution")
-                st.write(uploaded_df[TARGET_COLUMN].value_counts())
-
-            st.info(
-                "Go to the evaluation or comparison section after uploading the dataset."
-            )
+            st.subheader("Column Names")
+            st.write(uploaded_df.columns.tolist())
 
         except Exception as error:
-            st.error(f"Unable to read the uploaded file: {error}")
+            st.error(f"Failed to read uploaded file: {error}")
 
     else:
-        st.warning("Please upload a CSV file to continue.")
+        st.info("Please upload a CSV file to continue.")
 
 
-# ============================================================
+# ------------------------------------------------------------
 # Section 2: Evaluate Single Model
-# ============================================================
+# ------------------------------------------------------------
 
-elif selected_section == "Evaluate Single Model":
-    st.header("Evaluate a Selected Model")
+elif section == "Evaluate Single Model":
 
-    if st.session_state.uploaded_df is None:
-        st.warning("Please upload a dataset first from the Upload Test Data section.")
+    st.header("Evaluate Single Model")
+
+    if st.session_state.uploaded_data is None:
+        st.warning("Please upload a test dataset first from the Upload Test Data section.")
 
     else:
-        chosen_model_name = st.selectbox(
+        selected_model_name = st.selectbox(
             "Select a trained model",
-            list(MODEL_REGISTRY.keys()),
+            list(MODEL_FILES.keys())
         )
 
         if st.button("Run Evaluation"):
             try:
-                selected_model = load_saved_model(chosen_model_name)
+                model = load_model(selected_model_name)
 
-                X, y = prepare_uploaded_dataset(
-                    st.session_state.uploaded_df,
-                    selected_model,
+                X_test, y_test = prepare_uploaded_data(
+                    st.session_state.uploaded_data,
+                    model=model
                 )
 
-                if y is None:
-                    st.error(
-                        "The uploaded dataset does not contain a Churn column, "
-                        "so evaluation metrics cannot be calculated."
+                if selected_model_name in SCALED_MODELS:
+                    scaler = load_scaler()
+                    X_test = pd.DataFrame(
+                        scaler.transform(X_test),
+                        columns=X_test.columns
                     )
+
+                st.subheader("Prepared Feature Data")
+                st.dataframe(X_test.head())
+
+                if y_test is None:
+                    st.warning(
+                        "The uploaded dataset does not contain a Churn column. "
+                        "Only predictions can be generated."
+                    )
+
+                    predictions = model.predict(X_test)
+
+                    prediction_df = pd.DataFrame({
+                        "Predicted Churn": predictions
+                    })
+
+                    prediction_df["Predicted Churn"] = prediction_df["Predicted Churn"].map({
+                        0: "No",
+                        1: "Yes"
+                    })
+
+                    st.subheader("Predictions")
+                    st.dataframe(prediction_df)
+
                 else:
-                    X_for_prediction = apply_scaling_if_required(chosen_model_name, X)
-
-                    predictions = selected_model.predict(X_for_prediction)
-                    probabilities = get_prediction_probability(
-                        selected_model,
-                        X_for_prediction,
+                    y_pred, metrics, cm, report = evaluate_model(
+                        model,
+                        X_test,
+                        y_test
                     )
 
-                    metrics = calculate_metrics(y, predictions, probabilities)
-                    report = classification_report(y, predictions, zero_division=0)
+                    st.subheader("Evaluation Metrics")
 
-                    st.subheader(f"Evaluation Results: {chosen_model_name}")
-                    show_metric_cards(metrics)
+                    col1, col2, col3 = st.columns(3)
+
+                    with col1:
+                        st.metric("Accuracy", f"{metrics['Accuracy']:.4f}")
+                        st.metric("Precision", f"{metrics['Precision']:.4f}")
+
+                    with col2:
+                        st.metric("Recall", f"{metrics['Recall']:.4f}")
+                        st.metric("F1 Score", f"{metrics['F1 Score']:.4f}")
+
+                    with col3:
+                        st.metric("MCC", f"{metrics['MCC']:.4f}")
+
+                        if not np.isnan(metrics["ROC AUC"]):
+                            st.metric("ROC AUC", f"{metrics['ROC AUC']:.4f}")
+                        else:
+                            st.metric("ROC AUC", "N/A")
 
                     st.subheader("Confusion Matrix")
-                    plot_confusion_matrix(y, predictions)
+                    display_confusion_matrix(cm)
 
                     st.subheader("Classification Report")
-                    st.text(report)
-
-                    result_df = pd.DataFrame(
-                        {
-                            "Actual": y,
-                            "Predicted": predictions,
-                        }
-                    )
-
-                    if probabilities is not None:
-                        result_df["Churn Probability"] = probabilities
-
-                    st.subheader("Prediction Results")
-                    st.dataframe(result_df.head(20))
+                    report_df = pd.DataFrame(report).transpose()
+                    st.dataframe(report_df)
 
             except Exception as error:
                 st.error(f"Evaluation failed: {error}")
 
 
-# ============================================================
+# ------------------------------------------------------------
 # Section 3: Compare All Models
-# ============================================================
+# ------------------------------------------------------------
 
-elif selected_section == "Compare All Models":
-    st.header("Compare All Classification Models")
+elif section == "Compare All Models":
 
-    if st.session_state.uploaded_df is None:
-        st.warning("Please upload a dataset first from the Upload Test Data section.")
+    st.header("Compare All Models")
+
+    if st.session_state.uploaded_data is None:
+        st.warning("Please upload a test dataset first from the Upload Test Data section.")
 
     else:
         if st.button("Compare Models"):
-            try:
-                example_model_name = list(MODEL_REGISTRY.keys())[0]
-                example_model = load_saved_model(example_model_name)
+            comparison_results = []
 
-                X, y = prepare_uploaded_dataset(
-                    st.session_state.uploaded_df,
-                    example_model,
-                )
+            for model_name in MODEL_FILES.keys():
+                try:
+                    model = load_model(model_name)
 
-                if y is None:
-                    st.error(
-                        "The uploaded dataset does not contain a Churn column, "
-                        "so model comparison cannot be performed."
+                    X_test, y_test = prepare_uploaded_data(
+                        st.session_state.uploaded_data,
+                        model=model
                     )
-                else:
-                    comparison_df = build_comparison_table(X, y)
 
-                    st.subheader("Model Comparison Table")
-                    st.dataframe(comparison_df)
+                    if y_test is None:
+                        st.error(
+                            "The uploaded dataset does not contain a Churn column. "
+                            "Model comparison requires actual target values."
+                        )
+                        comparison_results = []
+                        break
 
-                    numeric_columns = [
+                    if model_name in SCALED_MODELS:
+                        scaler = load_scaler()
+                        X_test = pd.DataFrame(
+                            scaler.transform(X_test),
+                            columns=X_test.columns
+                        )
+
+                    _, metrics, _, _ = evaluate_model(
+                        model,
+                        X_test,
+                        y_test
+                    )
+
+                    comparison_results.append({
+                        "Model": model_name,
+                        "Accuracy": metrics["Accuracy"],
+                        "Precision": metrics["Precision"],
+                        "Recall": metrics["Recall"],
+                        "F1 Score": metrics["F1 Score"],
+                        "ROC AUC": metrics["ROC AUC"],
+                        "MCC": metrics["MCC"]
+                    })
+
+                except Exception as error:
+                    st.error(f"{model_name} failed: {error}")
+
+            if comparison_results:
+                comparison_df = pd.DataFrame(comparison_results)
+
+                st.subheader("Model Comparison Table")
+                st.dataframe(comparison_df)
+
+                st.subheader("Model Comparison Chart")
+
+                chart_df = comparison_df.set_index("Model")[
+                    [
                         "Accuracy",
                         "Precision",
                         "Recall",
                         "F1 Score",
                         "ROC AUC",
-                        "MCC",
+                        "MCC"
                     ]
+                ]
 
-                    available_numeric_columns = [
-                        col for col in numeric_columns if col in comparison_df.columns
-                    ]
+                st.bar_chart(chart_df)
 
-                    st.subheader("Metric Comparison Chart")
+                best_model = comparison_df.sort_values(
+                    by="F1 Score",
+                    ascending=False
+                ).iloc[0]
 
-                    chart_df = comparison_df.set_index("Model")[available_numeric_columns]
-                    st.bar_chart(chart_df)
-
-                    best_model_row = comparison_df.sort_values(
-                        by="F1 Score",
-                        ascending=False,
-                    ).head(1)
-
-                    if not best_model_row.empty:
-                        best_model_name = best_model_row.iloc[0]["Model"]
-                        best_f1_score = best_model_row.iloc[0]["F1 Score"]
-
-                        st.success(
-                            f"Best model based on F1 Score: "
-                            f"{best_model_name} with score {best_f1_score:.4f}"
-                        )
-
-            except Exception as error:
-                st.error(f"Model comparison failed: {error}")
+                st.success(
+                    f"Best model based on F1 Score: {best_model['Model']} "
+                    f"with F1 Score = {best_model['F1 Score']:.4f}"
+                )
