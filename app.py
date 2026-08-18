@@ -212,86 +212,31 @@ def encode_telco_columns(df):
 # Prepare Uploaded Dataset
 # ------------------------------------------------------------
 
-def prepare_uploaded_data(uploaded_df, model=None):
+def prepare_uploaded_dataset(uploaded_data: pd.DataFrame, model):
     """
-    Prepares uploaded test data for prediction.
+    Prepare uploaded Telco churn data for model prediction.
 
-    This function:
-    1. Removes customerID.
-    2. Separates Churn as target if available.
-    3. Converts TotalCharges to numeric.
-    4. Encodes categorical columns without creating dummy columns.
-    5. Aligns feature columns with the selected model's training columns.
+    Returns:
+        X: processed feature data
+        y: actual churn labels as 0/1 if Churn column exists
     """
+    data = uploaded_data.copy()
 
-    df = uploaded_df.copy()
+    data = remove_unused_columns(data)
+    data = clean_total_charges(data)
 
-    # Remove customerID because it is not useful for prediction
-    if "customerID" in df.columns:
-        df.drop(columns=["customerID"], inplace=True)
+    y = None
 
-    # Separate target column if available
-    y_test = None
+    if TARGET_COLUMN in data.columns:
+        y = normalize_churn_labels(data[TARGET_COLUMN])
+        X = data.drop(columns=[TARGET_COLUMN])
+    else:
+        X = data
 
-    if "Churn" in df.columns:
-        y_test = df["Churn"].copy()
-        df.drop(columns=["Churn"], inplace=True)
+    X = encode_categorical_features(X)
+    X = align_features_with_training(X, model)
 
-        if y_test.dtype == "object":
-            y_test = y_test.map({
-                "No": 0,
-                "Yes": 1
-            })
-
-    # Convert TotalCharges to numeric
-    if "TotalCharges" in df.columns:
-        df["TotalCharges"] = pd.to_numeric(df["TotalCharges"], errors="coerce")
-
-    # Fill missing numeric values
-    numeric_columns = df.select_dtypes(include=[np.number]).columns
-    for column in numeric_columns:
-        df[column] = df[column].fillna(df[column].median())
-
-    # Fill missing categorical values
-    categorical_columns = df.select_dtypes(include=["object"]).columns
-    for column in categorical_columns:
-        df[column] = df[column].fillna(df[column].mode()[0])
-
-    # Encode categorical columns
-    df = encode_telco_columns(df)
-
-    # If any unmapped categorical values remain, convert safely
-    for column in df.columns:
-        if df[column].dtype == "object":
-            df[column] = pd.factorize(df[column])[0]
-
-    # Align columns with model training features
-    if model is not None and hasattr(model, "feature_names_in_"):
-        expected_columns = list(model.feature_names_in_)
-
-        missing_columns = [col for col in expected_columns if col not in df.columns]
-        extra_columns = [col for col in df.columns if col not in expected_columns]
-
-        if missing_columns:
-            st.warning(
-                "Some expected model features were missing from the uploaded file. "
-                "They were added with value 0."
-            )
-            st.write("Missing columns:", missing_columns)
-
-            for column in missing_columns:
-                df[column] = 0
-
-        if extra_columns:
-            st.info(
-                "Some uploaded columns were not used by the model and were removed."
-            )
-            st.write("Removed columns:", extra_columns)
-
-        df = df[expected_columns]
-
-    return df, y_test
-
+    return X, y
 
 # ------------------------------------------------------------
 # Evaluation Function
